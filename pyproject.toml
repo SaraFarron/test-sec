@@ -24,6 +24,7 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = ["integration: requires PostgreSQL and RabbitMQ"]
 
 [tool.ruff]
@@ -32,4 +33,3 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
-
