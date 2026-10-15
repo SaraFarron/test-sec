@@ -105,6 +105,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             description=payment.description,
             metadata=payment.metadata_json,
             webhook_url=payment.webhook_url,
+            idempotency_key=payment.idempotency_key,
             processed_at=payment.processed_at,
             webhook_delivered_at=payment.webhook_delivered_at,
         )

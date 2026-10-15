@@ -23,6 +23,7 @@ async def test_create_and_get(client, sessions, payment_body):
     payment = response.json()
     assert payment["amount"] == "1250.50"
     assert payment["metadata"] == {"order_id": 42}
+    assert payment["idempotency_key"] == "order-42"
     assert payment["processed_at"] is None
     async with sessions() as db:
         event = await db.scalar(select(Outbox))

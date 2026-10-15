@@ -44,6 +44,7 @@ class PaymentDetails(PaymentAccepted):
     description: str
     metadata: dict[str, JsonValue]
     webhook_url: str
+    idempotency_key: str
     processed_at: datetime | None
     webhook_delivered_at: datetime | None
 
