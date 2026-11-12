@@ -3,11 +3,10 @@ import logging
 from datetime import UTC, datetime
 
 from faststream.rabbit import RabbitBroker
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.messaging import PAYMENTS_QUEUE, publish_confirmed
-from app.models import Outbox
+from app.repositories.outbox import OutboxRepository
 
 logger = logging.getLogger(__name__)
 
@@ -26,29 +25,23 @@ class OutboxRelay:
     async def publish_batch(self) -> int:
         published = 0
         async with self.sessions.begin() as db:
-            events = await db.scalars(
-                select(Outbox)
-                .where(Outbox.published_at.is_(None))
-                .order_by(Outbox.created_at, Outbox.id)
-                .limit(50)
-                .with_for_update(skip_locked=True)
-            )
+            outbox = OutboxRepository(db)
+            events = await outbox.get_unpublished_for_update(limit=50)
             for event in events:
-                event.publish_attempts += 1
+                outbox.record_publish_attempt(event)
                 try:
                     await publish_confirmed(
                         self.broker,
-                        event.payload,
+                        outbox.payload(event),
                         PAYMENTS_QUEUE,
                         message_id=str(event.id),
                         headers={"x-attempt": 1},
                     )
                 except Exception as exc:
                     logger.exception("Outbox publication failed: event_id=%s", event.id)
-                    event.last_error = type(exc).__name__
+                    outbox.record_publish_failure(event, exc)
                 else:
-                    event.published_at = datetime.now(UTC)
-                    event.last_error = None
+                    outbox.mark_published(event, datetime.now(UTC))
                     published += 1
         return published
 

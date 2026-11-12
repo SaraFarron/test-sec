@@ -5,10 +5,10 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import httpx
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.models import Outbox, Payment
+from app.repositories.outbox import OutboxRepository
+from app.repositories.payments import PaymentRepository
 from app.schemas import PaymentEvent
 
 logger = logging.getLogger(__name__)
@@ -32,12 +32,10 @@ class PaymentProcessor:
 
     async def process(self, event: PaymentEvent) -> None:
         async with self.sessions.begin() as db:
-            outbox = await db.get(Outbox, event.event_id)
+            outbox = await OutboxRepository(db).get(event.event_id)
             if outbox is None or outbox.payment_id != event.payment_id:
                 raise ValueError("Event does not match a persisted outbox entry")
-            payment = await db.scalar(
-                select(Payment).where(Payment.id == event.payment_id).with_for_update()
-            )
+            payment = await PaymentRepository(db).get_for_update(event.payment_id)
             if payment is None:
                 raise ValueError("Payment does not exist")
             if payment.status == "pending":
@@ -49,9 +47,7 @@ class PaymentProcessor:
 
         # Commit the outcome before HTTP; redelivery must not call the gateway again.
         async with self.sessions.begin() as db:
-            payment = await db.scalar(
-                select(Payment).where(Payment.id == event.payment_id).with_for_update()
-            )
+            payment = await PaymentRepository(db).get_for_update(event.payment_id)
             if payment is None:
                 raise ValueError("Payment disappeared before webhook delivery")
             if payment.webhook_delivered_at is not None:

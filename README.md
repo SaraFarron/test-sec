@@ -7,6 +7,15 @@
 Стек: Python 3.12, FastAPI, Pydantic v2, асинхронный SQLAlchemy, PostgreSQL,
 RabbitMQ / FastStream, Alembic.
 
+## Слои приложения
+
+HTTP-обработчики в `app/api.py` отвечают за валидацию запроса и HTTP-ответы.
+Сценарии создания и получения платежей находятся в `app/services`; запросы
+к PostgreSQL и изменения моделей инкапсулированы в `app/repositories`.
+Consumer и outbox relay также используют репозитории для доступа к данным.
+`app/models.py` содержит ORM-модели, а `app/schemas.py` — контракты API
+и события очереди.
+
 ## Запуск
 
 Нужны Docker и Docker Compose.

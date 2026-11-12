@@ -2,17 +2,19 @@ import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.db import create_database
-from app.models import Outbox, Payment
-from app.schemas import PaymentAccepted, PaymentDetails, PaymentEvent, PaymentRequest
+from app.schemas import PaymentAccepted, PaymentDetails, PaymentRequest
+from app.services.payments import (
+    IdempotencyConflictError,
+    PaymentNotFoundError,
+    PaymentsService,
+)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -59,43 +61,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             str, Header(alias="Idempotency-Key", min_length=1, max_length=255, pattern=r"^\S+$")
         ],
     ) -> PaymentAccepted:
-        values = body.database_values()
-        async with db.begin():
-            payment_id = await db.scalar(
-                insert(Payment)
-                .values(id=uuid4(), idempotency_key=idempotency_key, **values)
-                .on_conflict_do_nothing(index_elements=[Payment.idempotency_key])
-                .returning(Payment.id)
-            )
-            payment = await db.scalar(
-                select(Payment).where(Payment.idempotency_key == idempotency_key)
-            )
-            if payment is None:
-                raise RuntimeError("Payment missing after insert")
-            if payment_id is None:
-                if any(getattr(payment, key) != value for key, value in values.items()):
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Idempotency key already used with a different payload",
-                    )
-            else:
-                event = PaymentEvent(event_id=uuid4(), payment_id=payment.id)
-                db.add(
-                    Outbox(
-                        id=event.event_id,
-                        payment_id=payment.id,
-                        payload=event.model_dump(mode="json"),
-                    )
-                )
+        try:
+            payment = await PaymentsService(db).create(body, idempotency_key)
+        except IdempotencyConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Idempotency key already used with a different payload",
+            ) from exc
         return PaymentAccepted(
             payment_id=payment.id, status=payment.status, created_at=payment.created_at
         )
 
     @app.get("/api/v1/payments/{payment_id}", response_model=PaymentDetails)
     async def get_payment(payment_id: UUID, db: db_dependency) -> PaymentDetails:
-        payment = await db.get(Payment, payment_id)
-        if payment is None:
-            raise HTTPException(status_code=404, detail="Payment not found")
+        try:
+            payment = await PaymentsService(db).get(payment_id)
+        except PaymentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Payment not found") from exc
         return PaymentDetails(
             payment_id=payment.id,
             status=payment.status,

@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -22,6 +22,9 @@ class Base(DeclarativeBase):
     pass
 
 
+PaymentStatus = Literal["pending", "succeeded", "failed"]
+
+
 class Payment(Base):
     __tablename__ = "payments"
     __table_args__ = (
@@ -40,7 +43,9 @@ class Payment(Base):
     currency: Mapped[str] = mapped_column(String(3))
     description: Mapped[str] = mapped_column(Text)
     metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB)
-    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
+    status: Mapped[PaymentStatus] = mapped_column(
+        String(16), default="pending", server_default="pending"
+    )
     idempotency_key: Mapped[str] = mapped_column(String(255), unique=True)
     webhook_url: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
