@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, JsonValue
@@ -21,15 +21,6 @@ class PaymentRequest(BaseModel):
     description: str = Field(max_length=2000)
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
     webhook_url: HttpUrl = Field(max_length=2048)
-
-    def database_values(self) -> dict[str, Any]:
-        return {
-            "amount": self.amount,
-            "currency": self.currency.value,
-            "description": self.description,
-            "metadata_json": self.metadata,
-            "webhook_url": str(self.webhook_url),
-        }
 
 
 class PaymentAccepted(BaseModel):

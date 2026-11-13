@@ -32,7 +32,7 @@ class OutboxRelay:
                 try:
                     await publish_confirmed(
                         self.broker,
-                        outbox.payload(event),
+                        event.payload,
                         PAYMENTS_QUEUE,
                         message_id=str(event.id),
                         headers={"x-attempt": 1},

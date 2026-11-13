@@ -6,21 +6,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Outbox
-from app.schemas import PaymentEvent
 
 
 class OutboxRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    def add_event(self, event: PaymentEvent) -> None:
-        self.session.add(
-            Outbox(
-                id=event.event_id,
-                payment_id=event.payment_id,
-                payload=event.model_dump(mode="json"),
-            )
-        )
+    def add_event(self, event_id: UUID, payment_id: UUID, payload: dict[str, Any]) -> None:
+        self.session.add(Outbox(id=event_id, payment_id=payment_id, payload=payload))
 
     async def get(self, event_id: UUID) -> Outbox | None:
         return await self.session.get(Outbox, event_id)
@@ -44,6 +37,3 @@ class OutboxRepository:
 
     def record_publish_attempt(self, event: Outbox) -> None:
         event.publish_attempts += 1
-
-    def payload(self, event: Outbox) -> dict[str, Any]:
-        return event.payload
