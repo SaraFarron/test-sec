@@ -1,53 +1,45 @@
-import asyncio
 import logging
-import random
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.repositories.outbox import OutboxRepository
-from app.repositories.payments import PaymentRepository
+from app.gateway import simulate_gateway
+from app.repositories.uow import UnitOfWork
 from app.schemas import PaymentEvent
 
 logger = logging.getLogger(__name__)
 
 
-async def simulate_gateway() -> bool:
-    await asyncio.sleep(random.uniform(2, 5))
-    return random.random() < 0.9
-
-
 class PaymentProcessor:
     def __init__(
         self,
-        sessions: async_sessionmaker[AsyncSession],
+        uow: UnitOfWork,
         http: httpx.AsyncClient,
         gateway: Callable[[], Awaitable[bool]] = simulate_gateway,
     ) -> None:
-        self.sessions = sessions
+        self.uow = uow
         self.http = http
         self.gateway = gateway
 
     async def process(self, event: PaymentEvent) -> None:
-        async with self.sessions.begin() as db:
-            outbox = await OutboxRepository(db).get(event.event_id)
+        async with self.uow.begin() as repos:
+            outbox = await repos.outbox.get(event.event_id)
             if outbox is None or outbox.payment_id != event.payment_id:
                 raise ValueError("Event does not match a persisted outbox entry")
-            payment = await PaymentRepository(db).get_for_update(event.payment_id)
+            payment = await repos.payments.get_for_update(event.payment_id)
             if payment is None:
                 raise ValueError("Payment does not exist")
             if payment.status == "pending":
-                payment.status = "succeeded" if await self.gateway() else "failed"
-                payment.processed_at = datetime.now(UTC)
+                status = "succeeded" if await self.gateway() else "failed"
+                repos.payments.mark_processed(payment, status, datetime.now(UTC))
                 logger.info(
                     "Payment processed: payment_id=%s status=%s", payment.id, payment.status
                 )
 
         # Commit the outcome before HTTP; redelivery must not call the gateway again.
-        async with self.sessions.begin() as db:
-            payment = await PaymentRepository(db).get_for_update(event.payment_id)
+        async with self.uow.begin() as repos:
+            payment = await repos.payments.get_for_update(event.payment_id)
             if payment is None:
                 raise ValueError("Payment disappeared before webhook delivery")
             if payment.webhook_delivered_at is not None:
@@ -72,5 +64,5 @@ class PaymentProcessor:
                 headers={"Idempotency-Key": str(event.event_id)},
             )
             response.raise_for_status()
-            payment.webhook_delivered_at = datetime.now(UTC)
+            repos.payments.mark_webhook_delivered(payment, datetime.now(UTC))
             logger.info("Webhook delivered: payment_id=%s event_id=%s", payment.id, event.event_id)

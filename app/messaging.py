@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from faststream.rabbit import Channel, QueueType, RabbitBroker, RabbitQueue
@@ -70,3 +71,12 @@ async def publish_confirmed(
     )
     if not isinstance(confirmation, Basic.Ack):
         raise RuntimeError("RabbitMQ did not acknowledge publication")
+
+
+def payments_publisher(broker: RabbitBroker) -> Callable[[dict[str, Any], str], Awaitable[None]]:
+    async def publish(payload: dict[str, Any], message_id: str) -> None:
+        await publish_confirmed(
+            broker, payload, PAYMENTS_QUEUE, message_id=message_id, headers={"x-attempt": 1}
+        )
+
+    return publish

@@ -6,10 +6,12 @@ import pytest
 from pamqp.commands import Basic
 from sqlalchemy import select
 
+from app.gateway import simulate_gateway
+from app.messaging import payments_publisher
 from app.models import Outbox, Payment
-from app.outbox import OutboxRelay
-from app.processor import PaymentProcessor, simulate_gateway
 from app.schemas import PaymentEvent
+from app.services.outbox import OutboxService
+from app.services.processing import PaymentProcessor
 
 
 async def create_event(client, sessions, payment_body):
@@ -24,7 +26,7 @@ async def create_event(client, sessions, payment_body):
 
 @pytest.mark.integration
 @pytest.mark.parametrize("succeeds", [True, False])
-async def test_outcome_and_duplicate_delivery(client, sessions, payment_body, succeeds):
+async def test_outcome_and_duplicate_delivery(client, sessions, uow, payment_body, succeeds):
     event = await create_event(client, sessions, payment_body)
     received = []
 
@@ -34,7 +36,7 @@ async def test_outcome_and_duplicate_delivery(client, sessions, payment_body, su
 
     gateway = AsyncMock(return_value=succeeds)
     async with httpx.AsyncClient(transport=httpx.MockTransport(webhook)) as http:
-        processor = PaymentProcessor(sessions, http, gateway)
+        processor = PaymentProcessor(uow, http, gateway)
         await asyncio.gather(processor.process(event), processor.process(event))
         await processor.process(event)
     gateway.assert_awaited_once()
@@ -47,7 +49,7 @@ async def test_outcome_and_duplicate_delivery(client, sessions, payment_body, su
 
 
 @pytest.mark.integration
-async def test_webhook_retry_preserves_outcome(client, sessions, payment_body):
+async def test_webhook_retry_preserves_outcome(client, sessions, uow, payment_body):
     event = await create_event(client, sessions, payment_body)
     received = []
 
@@ -57,7 +59,7 @@ async def test_webhook_retry_preserves_outcome(client, sessions, payment_body):
 
     gateway = AsyncMock(return_value=True)
     async with httpx.AsyncClient(transport=httpx.MockTransport(webhook)) as http:
-        processor = PaymentProcessor(sessions, http, gateway)
+        processor = PaymentProcessor(uow, http, gateway)
         with pytest.raises(httpx.HTTPStatusError):
             await processor.process(event)
         async with sessions() as db:
@@ -71,12 +73,12 @@ async def test_webhook_retry_preserves_outcome(client, sessions, payment_body):
 
 
 @pytest.mark.integration
-async def test_outbox_failure_remains_publishable(client, sessions, payment_body):
+async def test_outbox_failure_remains_publishable(client, sessions, uow, payment_body):
     await create_event(client, sessions, payment_body)
     broker = AsyncMock()
     broker.publish.side_effect = ConnectionError("broker offline")
-    relay = OutboxRelay(sessions, broker, 1)
-    assert await relay.publish_batch() == 0
+    relay = OutboxService(uow, payments_publisher(broker))
+    assert await relay.publish_pending() == 0
     async with sessions() as db:
         outbox = await db.scalar(select(Outbox))
         assert outbox.published_at is None
@@ -84,8 +86,8 @@ async def test_outbox_failure_remains_publishable(client, sessions, payment_body
         assert outbox.last_error == "ConnectionError"
     broker.publish.side_effect = None
     broker.publish.return_value = Basic.Ack()
-    assert await relay.publish_batch() == 1
-    assert await relay.publish_batch() == 0
+    assert await relay.publish_pending() == 1
+    assert await relay.publish_pending() == 0
     async with sessions() as db:
         outbox = await db.scalar(select(Outbox))
         assert outbox.published_at is not None
@@ -94,13 +96,13 @@ async def test_outbox_failure_remains_publishable(client, sessions, payment_body
 
 
 @pytest.mark.integration
-async def test_concurrent_relays_do_not_double_publish(client, sessions, payment_body):
+async def test_concurrent_relays_do_not_double_publish(client, sessions, uow, payment_body):
     await create_event(client, sessions, payment_body)
     broker = AsyncMock()
     broker.publish.return_value = Basic.Ack()
     results = await asyncio.gather(
-        OutboxRelay(sessions, broker, 1).publish_batch(),
-        OutboxRelay(sessions, broker, 1).publish_batch(),
+        OutboxService(uow, payments_publisher(broker)).publish_pending(),
+        OutboxService(uow, payments_publisher(broker)).publish_pending(),
     )
     assert sum(results) == 1
     broker.publish.assert_awaited_once()
@@ -109,11 +111,11 @@ async def test_concurrent_relays_do_not_double_publish(client, sessions, payment
 async def test_gateway_delay_and_success_threshold(monkeypatch):
     sleep = AsyncMock()
     uniform = Mock(return_value=3.5)
-    monkeypatch.setattr("app.processor.asyncio.sleep", sleep)
-    monkeypatch.setattr("app.processor.random.uniform", uniform)
-    monkeypatch.setattr("app.processor.random.random", lambda: 0.899999)
+    monkeypatch.setattr("app.gateway.asyncio.sleep", sleep)
+    monkeypatch.setattr("app.gateway.random.uniform", uniform)
+    monkeypatch.setattr("app.gateway.random.random", lambda: 0.899999)
     assert await simulate_gateway() is True
     uniform.assert_called_once_with(2, 5)
     sleep.assert_awaited_once_with(3.5)
-    monkeypatch.setattr("app.processor.random.random", lambda: 0.9)
+    monkeypatch.setattr("app.gateway.random.random", lambda: 0.9)
     assert await simulate_gateway() is False

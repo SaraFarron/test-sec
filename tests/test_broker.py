@@ -17,15 +17,20 @@ from app.messaging import (
     RETRY_QUEUES,
     create_broker,
     declare_queues,
+    payments_publisher,
     publish_confirmed,
 )
-from app.outbox import OutboxRelay
-from app.processor import PaymentProcessor
 from app.schemas import PaymentEvent
+from app.services.outbox import OutboxService
+from app.services.processing import PaymentProcessor
 from app.worker import PaymentConsumer, register_consumer
 from tests.test_processing import create_event
 
 pytestmark = pytest.mark.integration
+
+
+def outbox_service(uow, broker):
+    return OutboxService(uow, payments_publisher(broker))
 
 
 @pytest_asyncio.fixture
@@ -50,9 +55,9 @@ async def wait_for_message(queue):
             await asyncio.sleep(0.05)
 
 
-async def test_real_outbox_delivery(client, sessions, payment_body, broker):
+async def test_real_outbox_delivery(client, sessions, uow, payment_body, broker):
     event = await create_event(client, sessions, payment_body)
-    assert await OutboxRelay(sessions, broker, 1).publish_batch() == 1
+    assert await outbox_service(uow, broker).publish_pending() == 1
     queue = await broker.declare_queue(PAYMENTS_QUEUE)
     incoming = await wait_for_message(queue)
     assert json.loads(incoming.body) == event.model_dump(mode="json")
@@ -61,7 +66,7 @@ async def test_real_outbox_delivery(client, sessions, payment_body, broker):
     await incoming.ack()
 
 
-async def test_publish_before_commit_failure_is_safe(client, sessions, payment_body, broker):
+async def test_publish_before_commit_failure_is_safe(client, sessions, uow, payment_body, broker):
     event = await create_event(client, sessions, payment_body)
     async with sessions.begin() as db:
         await db.execute(
@@ -69,12 +74,12 @@ async def test_publish_before_commit_failure_is_safe(client, sessions, payment_b
                 "ALTER TABLE outbox ADD CONSTRAINT fail_publish_commit CHECK (published_at IS NULL)"
             )
         )
-    relay = OutboxRelay(sessions, broker, 1)
+    relay = outbox_service(uow, broker)
     with pytest.raises(IntegrityError, match="fail_publish_commit"):
-        await relay.publish_batch()
+        await relay.publish_pending()
     async with sessions.begin() as db:
         await db.execute(text("ALTER TABLE outbox DROP CONSTRAINT fail_publish_commit"))
-    assert await relay.publish_batch() == 1
+    assert await relay.publish_pending() == 1
     queue = await broker.declare_queue(PAYMENTS_QUEUE)
     first = await wait_for_message(queue)
     second = await wait_for_message(queue)
@@ -83,7 +88,7 @@ async def test_publish_before_commit_failure_is_safe(client, sessions, payment_b
     gateway = AsyncMock(return_value=True)
     webhook = Mock(return_value=httpx.Response(204))
     async with httpx.AsyncClient(transport=httpx.MockTransport(webhook)) as http:
-        processor = PaymentProcessor(sessions, http, gateway)
+        processor = PaymentProcessor(uow, http, gateway)
         for incoming in (first, second):
             await processor.process(PaymentEvent.model_validate_json(incoming.body))
             await incoming.ack()
@@ -91,7 +96,7 @@ async def test_publish_before_commit_failure_is_safe(client, sessions, payment_b
     assert webhook.call_count == 1
 
 
-async def test_real_retry_recovers(client, sessions, payment_body, broker):
+async def test_real_retry_recovers(client, sessions, uow, payment_body, broker):
     event = await create_event(client, sessions, payment_body)
     delivered = asyncio.Event()
     calls = 0
@@ -106,11 +111,9 @@ async def test_real_retry_recovers(client, sessions, payment_body, broker):
 
     gateway = AsyncMock(return_value=True)
     async with httpx.AsyncClient(transport=httpx.MockTransport(webhook)) as http:
-        register_consumer(
-            broker, PaymentConsumer(broker, PaymentProcessor(sessions, http, gateway))
-        )
+        register_consumer(broker, PaymentConsumer(broker, PaymentProcessor(uow, http, gateway)))
         await broker.start()
-        await OutboxRelay(sessions, broker, 1).publish_batch()
+        await outbox_service(uow, broker).publish_pending()
         async with asyncio.timeout(10):
             await delivered.wait()
             while True:
@@ -124,7 +127,7 @@ async def test_real_retry_recovers(client, sessions, payment_body, broker):
         assert await dead.get(fail=False) is None
 
 
-async def test_real_retries_and_dead_letter(client, sessions, payment_body, broker):
+async def test_real_retries_and_dead_letter(client, sessions, uow, payment_body, broker):
     event = await create_event(client, sessions, payment_body)
     calls = []
     payloads = []
@@ -136,10 +139,10 @@ async def test_real_retries_and_dead_letter(client, sessions, payment_body, brok
 
     gateway = AsyncMock(return_value=True)
     async with httpx.AsyncClient(transport=httpx.MockTransport(webhook)) as http:
-        consumer = PaymentConsumer(broker, PaymentProcessor(sessions, http, gateway))
+        consumer = PaymentConsumer(broker, PaymentProcessor(uow, http, gateway))
         register_consumer(broker, consumer)
         await broker.start()
-        assert await OutboxRelay(sessions, broker, 1).publish_batch() == 1
+        assert await outbox_service(uow, broker).publish_pending() == 1
         dead = await broker.declare_queue(DEAD_QUEUE)
         incoming = await wait_for_message(dead)
         assert incoming.headers["x-attempt"] == 3

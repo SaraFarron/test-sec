@@ -16,11 +16,14 @@ from app.messaging import (
     RETRY_QUEUES,
     create_broker,
     declare_queues,
+    payments_publisher,
     publish_confirmed,
 )
 from app.outbox import OutboxRelay
-from app.processor import PaymentProcessor
+from app.repositories.uow import UnitOfWork
 from app.schemas import PaymentEvent
+from app.services.outbox import OutboxService
+from app.services.processing import PaymentProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -100,11 +103,14 @@ async def run() -> None:
             ) as http,
             broker,
         ):
-            consumer = PaymentConsumer(broker, PaymentProcessor(sessions, http))
+            uow = UnitOfWork(sessions)
+            consumer = PaymentConsumer(broker, PaymentProcessor(uow, http))
             register_consumer(broker, consumer)
             await declare_queues(broker)
             await broker.start()
-            relay = OutboxRelay(sessions, broker, settings.outbox_poll_seconds)
+            relay = OutboxRelay(
+                OutboxService(uow, payments_publisher(broker)), settings.outbox_poll_seconds
+            )
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(relay.run(stop))
                 await stop.wait()

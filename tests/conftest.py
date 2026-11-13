@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.api import create_app
 from app.config import Settings
 from app.models import Base
+from app.repositories.uow import UnitOfWork
 
 API_KEY = "test-api-key-long-enough"
 
@@ -36,6 +37,11 @@ async def sessions(settings: Settings) -> AsyncIterator[async_sessionmaker[Async
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
     await engine.dispose()
+
+
+@pytest.fixture
+def uow(sessions: async_sessionmaker[AsyncSession]) -> UnitOfWork:
+    return UnitOfWork(sessions)
 
 
 @pytest_asyncio.fixture
