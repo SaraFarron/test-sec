@@ -4,7 +4,6 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import APIKeyHeader
 
-from app.repositories.uow import UnitOfWork
 from app.services.payments import PaymentsService
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -19,7 +18,7 @@ async def authenticate(
 
 
 def get_payments_service(request: Request) -> PaymentsService:
-    return PaymentsService(UnitOfWork(request.app.state.sessions))
+    return request.app.state.payments_service
 
 
 PaymentsServiceDep = Annotated[PaymentsService, Depends(get_payments_service)]

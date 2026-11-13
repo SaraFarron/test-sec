@@ -10,6 +10,7 @@ from app.api import create_app
 from app.config import Settings
 from app.models import Base
 from app.repositories.uow import UnitOfWork
+from app.services.payments import PaymentsService
 
 API_KEY = "test-api-key-long-enough"
 
@@ -45,10 +46,10 @@ def uow(sessions: async_sessionmaker[AsyncSession]) -> UnitOfWork:
 
 
 @pytest_asyncio.fixture
-async def client(settings, sessions):
+async def client(settings, uow):
     app = create_app(settings)
     async with app.router.lifespan_context(app):
-        app.state.sessions = sessions
+        app.state.payments_service = PaymentsService(uow)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
